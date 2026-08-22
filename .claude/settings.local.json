@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Content \"c:\\\\Users\\\\admin\\\\Downloads\\\\Iptables_parser\\\\core_models.py\",\"c:\\\\Users\\\\admin\\\\Downloads\\\\Iptables_parser\\\\iptables_parser.py\",\"c:\\\\Users\\\\admin\\\\Downloads\\\\Iptables_parser\\\\nftables_parser.py\",\"c:\\\\Users\\\\admin\\\\Downloads\\\\Iptables_parser\\\\evaluator.py\" | ForEach-Object { $path = $_.File; $lines = \\($_ | Measure-Object -Line\\).Lines; Write-Output \"$path : $lines lines\" })",
+      "Bash(python iptables_audit.py test_iptables.txt)",
+      "Bash(python evaluator.py test_iptables.txt --type iptables --admin-cidr 10.0.0.0/8)",
+      "Bash(rm -rf __pycache__)",
+      "Bash(python -c ' *)",
+      "Bash(python *)",
+      "Bash(python3 nftables_parser_test.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3)",
+      "Bash(python3 nftables_audit.py nftables.txt)"
+    ]
+  },
+  "spinnerTipsEnabled": true
+}
