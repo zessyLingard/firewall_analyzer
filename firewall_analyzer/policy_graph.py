@@ -117,10 +117,12 @@ def normalize_chains(
     metadata: dict[str, object] | None = None,
 ) -> PolicyGraph:
     """Convert parser-native chains into the canonical policy graph."""
+    graph_metadata = dict(metadata or {})
+    graph_metadata.setdefault("source_format", source_format)
     return PolicyGraph(
         source_format=source_format,
         scopes=dict(chains),
-        metadata=metadata or {},
+        metadata=graph_metadata,
     )
 
 
@@ -138,6 +140,7 @@ def _scope_to_dict(scope: Chain) -> dict:
 
 def _rule_to_dict(rule: Rule) -> dict:
     return {
+        "chain": rule.chain,
         "action": rule.action,
         "protocol": rule.protocol,
         "sources": [str(value) for value in rule.sources],
@@ -159,6 +162,7 @@ def _rule_to_dict(rule: Rule) -> dict:
         "line_number": rule.line_number,
         "source_range": rule.src_range,
         "destination_range": rule.dst_range,
+        "address_unknown": rule.address_unknown,
     }
 
 
@@ -196,6 +200,7 @@ def _rule_from_dict(value: object) -> Rule:
         line_number=int(value.get("line_number", 0)),
         src_range=_optional_string(value.get("source_range")),
         dst_range=_optional_string(value.get("destination_range")),
+        address_unknown=bool(value.get("address_unknown", False)),
     )
 
 

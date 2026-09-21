@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""
-firewalld parser — parses firewalld XML zones, direct.xml, and CLI output
-into dict[str, Chain].
+"""Parse collected firewalld command output into normalized chains.
+
+The supported collection input is text from commands such as
+``firewall-cmd --list-all-zones``. Legacy XML support remains for compatibility,
+but the normal ingestion path is collected ``.txt`` output.
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ SERVICE_MAP: dict[str, list[tuple]] = {
 
 def load_firewalld(source: str | list[str]) -> dict[str, Chain]:
     """
-    Parse a firewalld file (XML or CLI text) into {chain_name: Chain}.
+    Parse collected firewalld text into {chain_name: Chain}.
 
     Args:
         source: file path (str) or rule text (list[str] of lines)
@@ -86,7 +88,7 @@ def _parse_zone_xml(root: ET.Element) -> dict[str, Chain]:
         name=chain_name,
         table="filter",
         rules=rules,
-        metadata={"kind": "zone", "name": zone_name, "active": False},
+        metadata={"kind": "zone", "name": zone_name, "active": None},
     )
     target = (root.get("target") or "default").upper()
     if target in ("DROP", "REJECT", "ACCEPT"):
@@ -113,7 +115,7 @@ def _parse_firewall_config(root: ET.Element) -> dict[str, Chain]:
             name=zone_name,
             table="filter",
             rules=rules,
-            metadata={"kind": "zone", "name": zone_name, "active": False},
+            metadata={"kind": "zone", "name": zone_name, "active": None},
         )
         target = (zone_elem.get("target") or "default").upper()
         if target in ("DROP", "REJECT", "ACCEPT"):
@@ -133,12 +135,9 @@ def _zone_rules(elem: ET.Element, zone_name: str, chain: str) -> list[Rule]:
 
     target = elem.get("target", "default").upper()
     if target in ("DROP", "REJECT"):
-        return [Rule(
-            chain=chain,
-            action="ACCEPT",
-            sources=[_safe_net(s) for s in sources] or [ipaddress.ip_network("0.0.0.0/0")],
-            raw_line=f"<zone target={target}>",
-        )]
+        return []
+
+    source_values, source_range = _normalise_addresses(sources)
 
     for svc in elem.findall("service"):
         svc_name = svc.get("name", "").lower()
@@ -148,10 +147,11 @@ def _zone_rules(elem: ET.Element, zone_name: str, chain: str) -> list[Rule]:
                 chain=chain,
                 action="ACCEPT",
                 protocol=proto,
-                sources=[_safe_net(s) for s in sources],
+                sources=source_values,
                 ports=[(proto, lo, hi)],
                 raw=f"zone {zone_name}: service {svc_name} ({proto}/{lo}-{hi})",
                 has_comment=True,
+                src_range=source_range,
             ))
 
     for port in elem.findall("port"):
@@ -163,9 +163,10 @@ def _zone_rules(elem: ET.Element, zone_name: str, chain: str) -> list[Rule]:
                 chain=chain,
                 action="ACCEPT",
                 protocol=proto,
-                sources=[_safe_net(s) for s in sources],
+                sources=source_values,
                 ports=[(proto, lo, hi)],
                 raw=f"zone {zone_name}: port {attr}/{proto}",
+                src_range=source_range,
             ))
 
     for rich in elem.findall("rule"):
@@ -213,20 +214,33 @@ def _rich_rule(elem: ET.Element, chain: str, zone_sources: list[str]) -> Rule | 
             ports_list.append((proto, lo, hi))
         raw_parts.append(f"{proto} dport {attr}")
 
+    service_elem = elem.find("service")
+    if service_elem is not None and not ports_list:
+        service_name = service_elem.get("name", "").lower()
+        entries = SERVICE_MAP.get(service_name, [])
+        if len(entries) == 1:
+            proto, lo, hi = entries[0]
+            ports_list.append((proto, lo, hi))
+        raw_parts.append(f"service {service_name}")
+
     proto_elem = elem.find("protocol")
     if proto_elem is not None:
         proto = proto_elem.get("value")
         raw_parts.append(f"proto {proto}")
 
     raw = "rich-rule: " + ", ".join(raw_parts) if raw_parts else "rich-rule"
+    source_values, source_range = _normalise_addresses(src_addrs or zone_sources)
+    destination_values, destination_range = _normalise_addresses(dst_addrs)
     return _make_rule(
         chain=chain,
         action=action,
         protocol=proto,
-        sources=[_safe_net(a) for a in (src_addrs or zone_sources)],
-        dests=[_safe_net(a) for a in dst_addrs],
+        sources=source_values,
+        dests=destination_values,
         ports=ports_list,
         raw=raw,
+        src_range=source_range,
+        dst_range=destination_range,
     )
 
 
@@ -295,6 +309,7 @@ def _parse_cli(text: str) -> dict[str, Chain]:
                 },
             )
             chains[zone_name] = chain
+            sources: list[str] = []
             i += 1
             while i < len(lines) and (not lines[i].strip() or lines[i].startswith("  ")):
                 value = lines[i].strip()
@@ -311,25 +326,29 @@ def _parse_cli(text: str) -> dict[str, Chain]:
                 elif value.startswith("interfaces:"):
                     chain.metadata["interfaces"] = value.split(":", 1)[1].strip().split()
                 elif value.startswith("services:"):
+                    source_values, source_range = _normalise_addresses(sources)
                     for service in value.split(":", 1)[1].strip().split():
                         for proto, lo, hi in SERVICE_MAP.get(service.lower(), []):
                             chain.rules.append(_make_rule(
                                 chain=zone_name, action="ACCEPT", protocol=proto,
-                                sources=[_safe_net(s) for s in sources],
+                                sources=source_values,
                                 ports=[(proto, lo, hi)],
                                 raw=f"zone {zone_name}: service {service} ({proto}/{lo}-{hi})",
                                 has_comment=True,
+                                src_range=source_range,
                             ))
                 elif value.startswith("ports:"):
+                    source_values, source_range = _normalise_addresses(sources)
                     for port_spec in value.split(":", 1)[1].strip().split():
                         port_match = re.match(r"^(\d+(?:-\d+)?)/(\w+)$", port_spec)
                         if port_match:
                             lo, hi = _parse_port_attr(port_match.group(1))
                             chain.rules.append(_make_rule(
                                 chain=zone_name, action="ACCEPT", protocol=port_match.group(2),
-                                sources=[_safe_net(s) for s in sources],
+                                sources=source_values,
                                 ports=[(port_match.group(2), lo, hi)],
                                 raw=f"zone {zone_name}: port {port_spec}",
+                                src_range=source_range,
                             ))
                 elif value.startswith("rich rules:"):
                     i += 1
@@ -409,14 +428,25 @@ def _cli_rich_rule(ln: str, default_sources: list[str]) -> Rule | None:
             protocol = port_match.group(2)
             ports.append((protocol, lo, hi))
 
+    service_match = re.search(r'\bservice\s+name="([^"]+)"', ln)
+    if service_match and not ports:
+        entries = SERVICE_MAP.get(service_match.group(1).lower(), [])
+        if len(entries) == 1:
+            protocol, lo, hi = entries[0]
+            ports.append((protocol, lo, hi))
+
+    source_values, source_range = _normalise_addresses(srcs)
+    destination_values, destination_range = _normalise_addresses(dsts)
     return _make_rule(
         chain="INPUT",
         action=action,
         protocol=protocol,
-        sources=[_safe_net(s) for s in srcs],
-        dests=[_safe_net(d) for d in dsts],
+        sources=source_values,
+        dests=destination_values,
         ports=ports,
         raw=ln.strip(),
+        src_range=source_range,
+        dst_range=destination_range,
     )
 
 
@@ -433,6 +463,8 @@ def _make_rule(
     iif: str | None = None,
     raw: str = "",
     has_comment: bool = False,
+    src_range: str | None = None,
+    dst_range: str | None = None,
 ) -> Rule:
     dports: list[PortRange] = []
     sports: list[PortRange] = []
@@ -457,6 +489,8 @@ def _make_rule(
         raw_line=raw,
         has_comment=has_comment,
         protocol=protocol,
+        src_range=src_range,
+        dst_range=dst_range,
     )
 
 
@@ -477,11 +511,31 @@ def _parse_port_attr(attr: str) -> tuple[int | None, int | None]:
         return None, None
 
 
-def _safe_net(addr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+def _normalise_addresses(
+    addresses: list[str],
+) -> tuple[list[ipaddress.IPv4Network | ipaddress.IPv6Network | None], str | None]:
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network | None] = []
+    address_range: str | None = None
+    for address in addresses:
+        if "-" in address:
+            start, end = address.split("-", 1)
+            try:
+                first = ipaddress.ip_address(start.strip())
+                last = ipaddress.ip_address(end.strip())
+                if first.version == last.version and first <= last:
+                    address_range = address
+                    continue
+            except ValueError:
+                pass
+        networks.append(_safe_net(address))
+    return networks, address_range
+
+
+def _safe_net(addr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
     try:
         return ipaddress.ip_network(addr.strip(), strict=False)
     except ValueError:
-        return ipaddress.ip_network("0.0.0.0/0")
+        return None
 
 
 def _is_cidr(s: str) -> bool:

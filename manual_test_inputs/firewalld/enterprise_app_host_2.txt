@@ -1,0 +1,43 @@
+public (active)
+  target: DROP
+  icmp-block-inversion: no
+  interfaces: eth0
+  sources:
+  services: ssh https
+  ports: 8080/tcp
+  protocols:
+  forward: no
+  masquerade: no
+  forward-ports:
+  source-ports:
+  icmp-blocks:
+  rich rules:
+    rule family="ipv4" source address="10.40.0.0/16" service name="ssh" accept
+    rule family="ipv4" source address="10.40.12.10-10.40.12.40" port port="9090" protocol="tcp" accept
+
+internal (active)
+  target: ACCEPT
+  icmp-block-inversion: no
+  interfaces: ens192
+  sources: 10.40.0.0/16
+  services: dns
+  ports: 5432/tcp 8443/tcp
+  protocols:
+  forward: no
+  masquerade: no
+  forward-ports:
+  source-ports:
+  icmp-blocks:
+  rich rules:
+    rule family="ipv4" source address="10.50.0.0/16" port port="3306" protocol="tcp" accept
+
+work
+  target: ACCEPT
+  interfaces:
+  sources: 10.99.0.0/16
+  services: http https
+  ports:
+  protocols:
+  forward: no
+  masquerade: no
+  rich rules:

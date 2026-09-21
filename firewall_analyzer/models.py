@@ -12,7 +12,7 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from ipaddress import IPv4Network, IPv6Network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
 from typing import Optional
 
 
@@ -92,11 +92,49 @@ class Rule:
     has_comment: bool = False
     raw_line: str = ""
     line_number: int = 0
+    address_unknown: bool = False
+
+    def __post_init__(self) -> None:
+        """Keep parser uncertainty explicit without changing the public model."""
+        source_values = list(self.sources)
+        destination_values = list(self.destinations)
+        self.address_unknown = self.address_unknown or any(
+            value is None for value in (*source_values, *destination_values)
+        )
+        self.sources = [value for value in source_values if value is not None]
+        self.destinations = [value for value in destination_values if value is not None]
 
     # ----- convenience helpers -----
 
+    @staticmethod
+    def _range_is_any(value: Optional[str]) -> bool | None:
+        """Return whether an inline address range is any address.
+
+        ``None`` means no range was supplied; ``False`` also covers malformed
+        ranges so callers do not turn parser uncertainty into an open rule.
+        """
+        if not value:
+            return None
+        try:
+            start_text, end_text = value.split("-", 1)
+            start = IPv4Address(start_text.strip()) if "." in start_text else IPv6Address(start_text.strip())
+            end = IPv4Address(end_text.strip()) if "." in end_text else IPv6Address(end_text.strip())
+            if start.version != end.version or int(start) > int(end):
+                return False
+            maximum = (2 ** start.max_prefixlen) - 1
+            return int(start) == 0 and int(end) == maximum
+        except ValueError:
+            return False
+
     def unrestricted_source(self) -> bool:
-        """True if 0.0.0.0/0 or ::/0 is the only source."""
+        """True if the rule accepts traffic from every source."""
+        if self.address_unknown:
+            return False
+        range_is_any = self._range_is_any(self.src_range)
+        if range_is_any is False:
+            return False
+        if range_is_any is True:
+            return True
         any4 = IPv4Network("0.0.0.0/0")
         any6 = IPv6Network("::/0")
         if any4 in self.sources or any6 in self.sources:
@@ -104,7 +142,14 @@ class Rule:
         return all(s.prefixlen == 0 for s in self.sources)
 
     def unrestricted_dest(self) -> bool:
-        """True if 0.0.0.0/0 or ::/0 is the only destination."""
+        """True if the rule accepts traffic to every destination."""
+        if self.address_unknown:
+            return False
+        range_is_any = self._range_is_any(self.dst_range)
+        if range_is_any is False:
+            return False
+        if range_is_any is True:
+            return True
         any4 = IPv4Network("0.0.0.0/0")
         any6 = IPv6Network("::/0")
         if any4 in self.destinations or any6 in self.destinations:

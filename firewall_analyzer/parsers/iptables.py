@@ -31,7 +31,7 @@ def load_iptables(source: str | list[str]) -> dict[str, Chain]:
     chains: dict[str, Chain] = {}
     in_filter = False
 
-    for raw_line in lines:
+    for line_number, raw_line in enumerate(lines, start=1):
         line = raw_line.strip()
         if not line:
             continue
@@ -62,7 +62,7 @@ def load_iptables(source: str | list[str]) -> dict[str, Chain]:
         if not (line.startswith("-A") or line.startswith("-I")):
             continue
 
-        rule = _parse_rule_line(line)
+        rule = _parse_rule_line(line, line_number=line_number)
         if rule is None:
             continue
 
@@ -83,7 +83,7 @@ def load_iptables(source: str | list[str]) -> dict[str, Chain]:
     return chains
 
 
-def _parse_rule_line(line: str) -> Rule | None:
+def _parse_rule_line(line: str, line_number: int = 0) -> Rule | None:
     tokens = shlex.split(line)
     if not tokens or tokens[0] not in ("-A", "-I"):
         return None
@@ -163,13 +163,14 @@ def _parse_rule_line(line: str) -> Rule | None:
         is_negated=is_negated,
         has_comment=has_comment,
         raw_line=line,
+        line_number=line_number,
         src_range=src_range,
         dst_range=dst_range,
     )
 
 
-def _safe_net(addr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+def _safe_net(addr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
     try:
         return ipaddress.ip_network(addr, strict=False)
     except ValueError:
-        return ipaddress.ip_network("0.0.0.0/0")
+        return None

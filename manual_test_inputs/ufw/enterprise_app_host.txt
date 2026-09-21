@@ -1,0 +1,16 @@
+Status: active
+Logging: on (medium)
+Default: deny (incoming), allow (outgoing), disabled (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW IN    10.40.0.0/16
+443/tcp                    ALLOW IN    10.40.0.0/16
+443/tcp                    ALLOW IN    Anywhere
+8080/tcp                   ALLOW IN    10.40.12.0/24
+9090/tcp                   ALLOW IN    10.40.12.10
+5432/tcp                   DENY IN     Anywhere
+3306/tcp                   ALLOW IN    Anywhere
+53/udp                     ALLOW IN    10.40.0.0/16
+22/tcp                     DENY IN     Anywhere (v6)

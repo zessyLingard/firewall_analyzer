@@ -7,8 +7,8 @@ into one PolicyGraph consumed by the analysis services.
 
 Usage:
     from firewall_analyzer.parsers import load_rules
-    chains = load_rules("rules.iptables")          # auto-detect
-    chains = load_rules("rules.nft", format="nftables")  # explicit
+    graph = load_rules("collected.txt", format="iptables")
+    graph.to_json()  # one canonical JSON schema for every parser
 """
 
 from __future__ import annotations

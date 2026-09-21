@@ -12,12 +12,10 @@ from typing import Optional
 from dataclasses import asdict
 
 from firewall_analyzer.models import Chain, Rule, PortRange
-from firewall_analyzer.shadowing import ShadowFinding, format_shadowing_json
 
 
 def export_audit_json(
     chains: Mapping[str, Chain],
-    shadowing_findings: Optional[list[ShadowFinding]] = None,
     filepath: str = "",
     metadata: Optional[dict[str, object]] = None,
 ) -> str:
@@ -39,10 +37,6 @@ def export_audit_json(
             "default_policy": chain.default_policy,
             "rules": [_rule_to_dict(r) for r in chain.rules],
         }
-    
-    # Export shadowing findings
-    if shadowing_findings:
-        data["shadowing"] = json.loads(format_shadowing_json(shadowing_findings))
     
     return json.dumps(data, indent=2)
 
@@ -67,13 +61,13 @@ def _rule_to_dict(rule: Rule) -> dict:
         "line_number": rule.line_number,
         "src_range": rule.src_range,
         "dst_range": rule.dst_range,
+        "address_unknown": rule.address_unknown,
     }
 
 
 def export_sarif(
     chains: Mapping[str, Chain],
     audit_results: Mapping[str, object],  # From audit scripts
-    shadowing_findings: Optional[list[ShadowFinding]] = None,
     filepath: str = "",
 ) -> str:
     """Export audit results in SARIF format for SIEM/IDE integration."""
@@ -93,18 +87,6 @@ def export_sarif(
                         check_id=check_name,
                         filepath=filepath,
                     ))
-    
-    # Convert shadowing findings
-    if shadowing_findings:
-        for f in shadowing_findings:
-            results.append(_make_sarif_result(
-                rule_line=f.shadowed_rule.raw_line,
-                check_id=f"SHADOWING-{f.shadow_type}",
-                filepath=filepath,
-                message=f"{f.shadow_type} shadowing: {f.description}",
-                location_chain=f.chain,
-                location_rule_index=f.shadowed_rule_index,
-            ))
     
     sarif = {
         "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
@@ -159,7 +141,6 @@ def _make_sarif_result(
 def export_html(
     chains: Mapping[str, Chain],
     audit_results: Optional[Mapping[str, object]] = None,
-    shadowing_findings: Optional[list[ShadowFinding]] = None,
     filepath: str = "",
     title: str = "Firewall Audit Report",
 ) -> str:
@@ -278,23 +259,6 @@ def export_html(
             elif isinstance(check_data, dict):
                 for k, v in check_data.items():
                     html += f'<p><strong>{k}:</strong> {v}</p>'
-        html += '</div>'
-    
-    # Shadowing findings
-    if shadowing_findings:
-        html += '<div class="section"><h2>Shadowing Analysis</h2>'
-        for f in shadowing_findings:
-            cls = f"finding-{f.shadow_type.lower()}"
-            html += f'''
-            <div class="finding {cls}">
-                <div class="finding-title">[{f.shadow_type}] Chain: {f.chain} - Rule {f.shadowing_rule_index} → Rule {f.shadowed_rule_index}</div>
-                <div class="finding-desc">{f.description}</div>
-                <div style="margin-top: 10px; font-size: 12px; font-family: monospace;">
-                    <div>Shadowing: {f.shadowing_rule.raw_line[:200]}</div>
-                    <div>Shadowed: {f.shadowed_rule.raw_line[:200]}</div>
-                </div>
-            </div>
-'''
         html += '</div>'
     
     html += """

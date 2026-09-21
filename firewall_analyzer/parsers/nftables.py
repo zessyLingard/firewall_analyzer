@@ -139,17 +139,16 @@ def _parse_stmt(stmt: str, chain: str) -> Rule | None:
             continue
 
         if tok in ("ip", "ipv4"):
-            proto = "ip"; j += 1; continue
+            proto = proto or "ip"; j += 1; continue
         if tok in ("ip6", "ipv6"):
-            proto = "ip6"; j += 1; continue
+            proto = proto or "ip6"; j += 1; continue
+
+        if tok in ("tcp", "udp", "icmp", "icmpv6", "esp", "ah", "gre"):
+            proto = tok; j += 1; continue
 
         if tok in ("saddr", "daddr") and j + 1 < len(tokens):
-            quad_ip, next_i = _reassemble(tokens, j + 1)
-            if quad_ip is not None:
-                nets = _parse_addresses(quad_ip)
-            else:
-                val, next_i = _collect_value(tokens, j + 1)
-                nets = _parse_addresses(val)
+            val, next_i = _collect_value(tokens, j + 1)
+            nets = _parse_addresses(val)
             if tok == "saddr":
                 src.extend(nets)
             else:
@@ -176,7 +175,7 @@ def _parse_stmt(stmt: str, chain: str) -> Rule | None:
 
         if tok in ("src", "dst") and j + 1 < len(tokens):
             val, next_i = _collect_value(tokens, j + 1)
-            val = val.strip().strip('"')
+            val = re.sub(r"\s+", "", val.strip().strip('"'))
             if "-" in val and not val.startswith("{"):
                 if tok == "src":
                     src_range = val
@@ -291,12 +290,14 @@ def _sanitise(raw: str) -> str:
     raw = raw.strip().strip('"').strip()
     raw = re.sub(r'\s+', '', raw)
     if not raw:
-        return "0.0.0.0/0"
+        return ""
+    if "/" in raw or "-" in raw:
+        return raw
     if ":" in raw:
         return raw
     segs = raw.split(".")
     if len(segs) != 4:
-        return "0.0.0.0/0"
+        return raw
     concrete = 0
     for s in segs:
         sl = s.lower()
@@ -304,7 +305,7 @@ def _sanitise(raw: str) -> str:
         if not s[0].isdigit(): break
         concrete += 1
     if concrete == 0:
-        return "0.0.0.0/0"
+        return raw
     concrete_str = ".".join(segs[:concrete])
     octets = concrete_str.split(".")
     while len(octets) < 4:
@@ -335,10 +336,10 @@ def _parse_addresses(val: str) -> list:
             try:
                 results.append(ipaddress.ip_network(addr, strict=False))
             except ValueError:
-                pass
+                results.append(None)
         return results
     addr = _sanitise(re.sub(r'\s+', '', val))
     try:
         return [ipaddress.ip_network(addr, strict=False)]
     except ValueError:
-        return []
+        return [None]

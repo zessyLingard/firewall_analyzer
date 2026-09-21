@@ -11,6 +11,7 @@ from typing import Any
 
 from firewall_analyzer.analyzer import run_audit
 from firewall_analyzer.parsers import load_rules
+from firewall_analyzer.reporting import write_text_report
 
 SUPPORTED_FORMATS = {"iptables", "nftables", "firewalld", "ufw"}
 
@@ -53,6 +54,11 @@ def main() -> None:
         nargs="+",
         default=None,
         help="Trusted administrator network(s)",
+    )
+    parser.add_argument(
+        "--all-zones",
+        action="store_true",
+        help="Include inactive firewalld zones in the audit",
     )
     args = parser.parse_args()
 
@@ -98,6 +104,9 @@ def process_one(source: Path, args: argparse.Namespace) -> dict[str, Any]:
     result_path = args.results_dir / Path(relative_name).with_name(
         Path(relative_name).stem + ".result.json"
     )
+    report_path = args.results_dir / Path(relative_name).with_name(
+        Path(relative_name).stem + ".result.txt"
+    )
     normalized_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -110,7 +119,11 @@ def process_one(source: Path, args: argparse.Namespace) -> dict[str, Any]:
         graph.metadata["source_file"] = str(source)
         normalized_path.write_text(graph.to_json() + "\n", encoding="utf-8")
 
-        audit = run_audit(graph, admin_cidrs=args.admin_cidr)
+        audit = run_audit(
+            graph,
+            admin_cidrs=args.admin_cidr,
+            active_only=False if args.all_zones else None,
+        )
         result = {
             "schema_version": "1.0",
             "source_file": str(source),
@@ -123,12 +136,14 @@ def process_one(source: Path, args: argparse.Namespace) -> dict[str, Any]:
             "findings": audit.to_dict(),
         }
         result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        write_text_report(report_path, result)
         return {
             "source_file": str(source),
             "source_format": format_name,
             "status": result["status"],
             "normalized_file": str(normalized_path),
             "result_file": str(result_path),
+            "report_file": str(report_path),
         }
     except Exception as error:
         error_result = {
@@ -138,11 +153,16 @@ def process_one(source: Path, args: argparse.Namespace) -> dict[str, Any]:
             "error": str(error),
         }
         result_path.write_text(json.dumps(error_result, indent=2) + "\n", encoding="utf-8")
+        report_path.write_text(
+            f"[ERROR] {source}\n{error}\n",
+            encoding="utf-8",
+        )
         return {
             "source_file": str(source),
             "source_format": None,
             "status": "ERROR",
             "result_file": str(result_path),
+            "report_file": str(report_path),
             "error": str(error),
         }
 
@@ -163,6 +183,8 @@ def build_summary(input_path: Path, records: list[dict[str, Any]]) -> dict[str, 
 
 
 def print_summary(summary: dict[str, Any], summary_path: Path) -> None:
+    for record in summary["files"]:
+        print(f"{record['status']}: {record['source_file']}")
     print(f"Processed: {summary['total']}")
     print(f"Passed: {summary['passed']}")
     print(f"Failed: {summary['failed']}")

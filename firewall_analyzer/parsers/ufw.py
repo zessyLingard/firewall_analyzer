@@ -52,12 +52,13 @@ def _parse_status_output(lines: list[str]) -> dict[str, Chain]:
       [ 2] 22/tcp                   ALLOW IN    Anywhere (v6)
       [ 3] 80/tcp                   DENY IN     192.168.1.0/24
     """
+    policies = _parse_default_policies(lines)
     chains: dict[str, Chain] = {
-        "INPUT": Chain(name="INPUT", table="filter", default_policy="DROP"),
-        "OUTPUT": Chain(name="OUTPUT", table="filter", default_policy="ACCEPT"),
+        "INPUT": Chain(name="INPUT", table="filter", default_policy=policies["INPUT"]),
+        "OUTPUT": Chain(name="OUTPUT", table="filter", default_policy=policies["OUTPUT"]),
     }
 
-    for ln in lines:
+    for line_number, ln in enumerate(lines, start=1):
         ln = ln.strip()
         if not ln:
             continue
@@ -69,12 +70,15 @@ def _parse_status_output(lines: list[str]) -> dict[str, Chain]:
         # Parse numbered rule: "[ 3] 80/tcp  DENY IN  192.168.1.0/24"
         m = re.match(r"\[\s*\d+\]\s+(\S+)(?:\s+(\S+))?\s+(ALLOW|DENY|LIMIT)\s+IN\s+(.*)", ln)
         if not m:
-            # Also try: "[ 1] 22  ALLOW IN  Anywhere"
-            m = re.match(r"\[\s*\d+\]\s+(\S+)\s+(ALLOW|DENY|LIMIT)\s+IN\s+(.*)", ln)
+            # Also accept unnumbered output from ``ufw status verbose``.
+            m = re.match(r"(\S+)(?:\s+(\S+))?\s+(ALLOW|DENY|LIMIT)\s+IN\s+(.*)", ln)
             if not m:
                 continue
-            port_str, action_raw, dest_info = m.group(1), m.group(2), m.group(3)
-            proto = None
+            if m.lastindex == 4:
+                port_str, proto, action_raw, dest_info = m.groups()
+            else:
+                port_str, action_raw, dest_info = m.groups()
+                proto = None
         else:
             port_str, proto, action_raw, dest_info = m.group(1), m.group(2), m.group(3), m.group(4)
 
@@ -116,9 +120,31 @@ def _parse_status_output(lines: list[str]) -> dict[str, Chain]:
             protocol=rule_proto,
             raw_line=raw,
             has_comment=False,
+            line_number=line_number,
         ))
 
     return chains
+
+
+def _parse_default_policies(lines: list[str]) -> dict[str, str]:
+    """Translate UFW's Default line into canonical INPUT/OUTPUT policies."""
+    policies = {"INPUT": "DROP", "OUTPUT": "ACCEPT"}
+    default_line = next((line for line in lines if line.startswith("Default:")), "")
+    for part in default_line.removeprefix("Default:").split(","):
+        value = part.strip().lower()
+        if value.startswith("deny (incoming)"):
+            policies["INPUT"] = "DROP"
+        elif value.startswith("allow (incoming)"):
+            policies["INPUT"] = "ACCEPT"
+        elif value.startswith("reject (incoming)"):
+            policies["INPUT"] = "REJECT"
+        elif value.startswith("deny (outgoing)"):
+            policies["OUTPUT"] = "DROP"
+        elif value.startswith("allow (outgoing)"):
+            policies["OUTPUT"] = "ACCEPT"
+        elif value.startswith("reject (outgoing)"):
+            policies["OUTPUT"] = "REJECT"
+    return policies
 
 
 def _parse_ufw_port(port_str: str, proto: str | None) -> tuple[list[PortRange], str | None]:
@@ -154,7 +180,7 @@ def _parse_ufw_port(port_str: str, proto: str | None) -> tuple[list[PortRange], 
 
 
 def _is_iptables_style(lines: list[str]) -> bool:
-    for ln in lines:
+    for line_number, ln in enumerate(lines, start=1):
         ln = ln.strip()
         if ln.startswith("-A ") or ln.startswith("-I ") or ln.startswith(":INPUT "):
             return True
@@ -176,7 +202,7 @@ def _parse_iptables_style(lines: list[str]) -> dict[str, Chain]:
         if not (ln.startswith("-A") or ln.startswith("-I")):
             continue
 
-        rule = _parse_iptables_rule(ln)
+        rule = _parse_iptables_rule(ln, line_number=line_number)
         if rule is None:
             continue
 
@@ -217,8 +243,8 @@ def _parse_rules_file(lines: list[str]) -> dict[str, Chain]:
         return line
 
     chains: dict[str, Chain] = {}
-    for ln in iptables_lines:
-        rule = _parse_iptables_rule(subst(ln))
+    for line_number, ln in enumerate(iptables_lines, start=1):
+        rule = _parse_iptables_rule(subst(ln), line_number=line_number)
         if rule is None:
             continue
         name = rule.chain or "INPUT"
@@ -228,7 +254,7 @@ def _parse_rules_file(lines: list[str]) -> dict[str, Chain]:
     return chains
 
 
-def _parse_iptables_rule(line: str) -> Rule | None:
+def _parse_iptables_rule(line: str, line_number: int = 0) -> Rule | None:
     """Parse a single iptables-style -A/-I rule line."""
     import shlex
     tokens = shlex.split(line)
@@ -305,13 +331,14 @@ def _parse_iptables_rule(line: str) -> Rule | None:
         states=states,
         has_comment=has_comment,
         raw_line=line,
+        line_number=line_number,
         src_range=src_range,
         dst_range=dst_range,
     )
 
 
-def _safe_net(addr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+def _safe_net(addr: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
     try:
         return ipaddress.ip_network(addr.strip(), strict=False)
     except ValueError:
-        return ipaddress.ip_network("0.0.0.0/0")
+        return None

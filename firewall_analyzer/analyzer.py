@@ -52,6 +52,10 @@ def _str(r: object, key: str) -> str | None:
     return str(v)
 
 
+def _finding_text(r: object) -> str:
+    return _str(r, "raw_line") or ""
+
+
 def _list(r: object, key: str) -> list[object]:
     v = _value(r, key)
     if v is None:
@@ -62,7 +66,12 @@ def _list(r: object, key: str) -> list[object]:
 
 
 def _is_unrestricted_source(r: Any) -> bool:
+    if isinstance(r, Rule):
+        return r.unrestricted_source()
     srcs = _list(r, "sources")
+    src_range = _str(r, "src_range")
+    if src_range:
+        return False
     if not srcs:
         return True
     for s in srcs:
@@ -76,7 +85,12 @@ def _is_unrestricted_source(r: Any) -> bool:
 
 
 def _is_unrestricted_dest(r: Any) -> bool:
+    if isinstance(r, Rule):
+        return r.unrestricted_dest()
     dsts = _list(r, "destinations")
+    dst_range = _str(r, "dst_range")
+    if dst_range:
+        return False
     if not dsts:
         return True
     for d in dsts:
@@ -112,6 +126,26 @@ def _proto(r: Any) -> str | None:
     return _str(r, "protocol") or _str(r, "proto")
 
 
+def _allows_all_protocols(r: Any) -> bool:
+    protocol = _proto(r)
+    return not protocol or protocol.strip().lower() in {"all", "any"}
+
+
+def _allows_all_ports(r: Any) -> bool:
+    return not (
+        _str(r, "dport")
+        or _str(r, "dports")
+        or _str(r, "sport")
+        or _str(r, "sports")
+        or _list(r, "ports")
+        or _list(r, "source_ports")
+    )
+
+
+def _is_broad_source(r: Any) -> bool:
+    return bool(_value(r, "is_negated")) or _is_unrestricted_source(r)
+
+
 _PORTLESS = frozenset({"icmp", "icmpv6", "ipv6-icmp", "esp", "ah", "gre", "vrrp",
                          "igmp", "ospf", "pim", "ip", "ip6", "ipv4", "ipv6"})
 
@@ -133,12 +167,17 @@ def _is_fully_open_accept(r: Any, direction: str) -> bool:
     if direction == "OUTPUT" and _str(r, "chain") != "OUTPUT":
         return False
     if direction == "INPUT":
-        if _str(r, "src_range") or not _is_unrestricted_source(r):
+        if not _is_unrestricted_source(r):
             return False
     elif direction == "OUTPUT":
-        if _str(r, "dst_range") or not _is_unrestricted_dest(r):
+        if not _is_unrestricted_dest(r):
             return False
-    return _is_state_new(r) and not _is_estab_related_only(r)
+    return (
+        _allows_all_protocols(r)
+        and _allows_all_ports(r)
+        and _is_state_new(r)
+        and not _is_estab_related_only(r)
+    )
 
 
 def _is_estab_related_only(r: Any) -> bool:
@@ -288,6 +327,7 @@ class AuditResult:
             not self.default_policy[0]
             or bool(self.ssh_no_comment)
             or bool(self.ssh_open_source)
+            or bool(self.missing_estab)
             or bool(self.input_no_port)
             or bool(self.output_no_port)
             or bool(self.input_fully_open)
@@ -315,13 +355,19 @@ class AuditResult:
 #  Main audit runner
 # --------------------------------------------------------------------------- #
 
-def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None) -> AuditResult:
+def run_audit(
+    chains: Mapping[str, Chain],
+    admin_cidrs: list[str] | None = None,
+    active_only: bool | None = None,
+) -> AuditResult:
     """
     Run the 10-point security audit on parsed chains.
 
     Args:
         chains: dict[str, Chain] from any parser
         admin_cidrs: list of trusted admin CIDR strings (e.g. ["10.0.0.0/8"])
+        active_only: filter firewalld zones to active zones. ``None`` enables
+            this automatically when the input contains explicit active flags.
 
     Returns:
         AuditResult
@@ -334,17 +380,37 @@ def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None)
             except ValueError:
                 pass
 
+    source_format = getattr(chains, "source_format", None)
+    state_is_visible = source_format not in {"ufw", "firewalld"}
+
     all_rules: list[Rule] = []
     rules_by_chain: dict[str, list[Rule]] = {}
     policies: dict[str, str] = {}
 
-    for name, chain in chains.items():
+    zone_activity_is_explicit = any(
+        chain.metadata.get("kind") == "zone"
+        and isinstance(chain.metadata.get("active"), bool)
+        for chain in chains.values()
+    )
+    filter_inactive = active_only if active_only is not None else zone_activity_is_explicit
+
+    selected_chains = {
+        name: chain
+        for name, chain in chains.items()
+        if not (
+            filter_inactive
+            and chain.metadata.get("kind") == "zone"
+            and chain.metadata.get("active") is not True
+        )
+    }
+
+    for name, chain in selected_chains.items():
         policies[name] = chain.default_policy or ""
         rules_by_chain[name] = chain.rules
         all_rules.extend(chain.rules)
 
-    inbound_chain_names = [name for name in chains if name not in ("OUTPUT", "FORWARD")]
-    if "INPUT" in chains:
+    inbound_chain_names = [name for name in selected_chains if name not in ("OUTPUT", "FORWARD")]
+    if "INPUT" in selected_chains:
         inbound_chain_names = ["INPUT"]
     inbound_rules = [rule for name in inbound_chain_names for rule in rules_by_chain.get(name, [])]
 
@@ -357,7 +423,11 @@ def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None)
 
     inp_pol = policies.get("INPUT", "").upper()
     out_pol = policies.get("OUTPUT", "").upper()
-    if inp_pol in ("DROP", "REJECT") and out_pol in ("DROP", "REJECT"):
+    if source_format == "ufw" and inp_pol in ("DROP", "REJECT"):
+        policy_ok, policy_reason = True, (
+            f"UFW default incoming policy={inp_pol}; outgoing policy={out_pol or 'NOT SET'}"
+        )
+    elif inp_pol in ("DROP", "REJECT") and out_pol in ("DROP", "REJECT"):
         policy_ok, policy_reason = True, "Default policy INPUT/OUTPUT = DROP/REJECT"
     elif "INPUT" not in chains and "OUTPUT" not in chains and inbound_chain_names:
         policy_ok, policy_reason = True, "firewalld zone targets control inbound traffic; no INPUT/OUTPUT chains are present"
@@ -373,7 +443,7 @@ def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None)
 
     # 1c. Missing ESTABLISHED,RELATED
     missing_estab: list[str] = []
-    for ch in ("INPUT", "OUTPUT"):
+    for ch in ("INPUT", "OUTPUT") if state_is_visible else ():
         ch_pol = policies.get(ch)
         ch_rules = rules_by_chain.get(ch, [])
         if not ch_rules and not ch_pol:
@@ -398,15 +468,19 @@ def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None)
         if _is_ssh_relevant(r):
             if not _str(r, "has_comment"):
                 if not admin_nets or not _admin_range(r, admin_nets):
-                    ssh_no_comment.append(_str(r, "raw_line") or "")
+                    ssh_no_comment.append(_finding_text(r))
 
     # 2b. SSH open source
     ssh_open_source: list[str] = []
     for r in all_rules:
         if _is_ssh_relevant(r):
-            has_src = bool(_str(r, "source")) or bool(_str(r, "src_range")) or not _is_unrestricted_source(r)
+            has_src = (
+                bool(_str(r, "source"))
+                or bool(_str(r, "src_range"))
+                or (not _is_broad_source(r) and not bool(_value(r, "is_negated")))
+            )
             if not has_src:
-                ssh_open_source.append(_str(r, "raw_line") or "")
+                ssh_open_source.append(_finding_text(r))
 
     # 3a. INPUT without dest port restriction
     input_no_port: list[str] = []
@@ -424,7 +498,7 @@ def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None)
         if not _has_dest_port(r):
             if _is_spoofable_sport_only(r):
                 continue
-            input_no_port.append(_str(r, "raw_line") or "")
+            input_no_port.append(_finding_text(r))
 
     # 3b. OUTPUT without dest port restriction
     output_no_port: list[str] = []
@@ -440,32 +514,32 @@ def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None)
         if not _is_state_new(r):
             continue
         if not _has_dest_port(r):
-            output_no_port.append(_str(r, "raw_line") or "")
+            output_no_port.append(_finding_text(r))
 
     # 4a. INPUT fully open
     input_fully_open: list[str] = []
     for r in inbound_rules:
         if _is_fully_open_accept(r, "INPUT"):
-            input_fully_open.append(_str(r, "raw_line") or "")
+            input_fully_open.append(_finding_text(r))
 
     # 4b. OUTPUT fully open
     output_fully_open: list[str] = []
     for r in rules_by_chain.get("OUTPUT", []):
         if _is_fully_open_accept(r, "OUTPUT"):
-            output_fully_open.append(_str(r, "raw_line") or "")
+            output_fully_open.append(_finding_text(r))
 
     # 5. SSH outside admin range
     ssh_outside_admin: list[str] = []
     if admin_nets:
         for r in all_rules:
             if _is_ssh_relevant(r) and not _admin_range(r, admin_nets):
-                ssh_outside_admin.append(_str(r, "raw_line") or "")
+                ssh_outside_admin.append(_finding_text(r))
 
     # 6. Sport-only spoofable
     sport_spoofable: list[str] = []
     for r in inbound_rules:
         if _is_spoofable_sport_only(r):
-            sport_spoofable.append(_str(r, "raw_line") or "")
+            sport_spoofable.append(_finding_text(r))
 
     return AuditResult(
         default_policy=(policy_ok, policy_reason),

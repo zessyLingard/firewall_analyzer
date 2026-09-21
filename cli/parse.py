@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert one native firewall file into canonical JSON."""
+"""Convert one collected firewall text file into canonical JSON."""
 
 import argparse
 import sys
@@ -9,7 +9,7 @@ from firewall_analyzer.parsers import load_rules
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parse firewall input into canonical JSON")
-    parser.add_argument("file", help="Native firewall ruleset file")
+    parser.add_argument("file", help="Collected firewall output text file")
     parser.add_argument(
         "--format",
         choices=["auto", "iptables", "nftables", "firewalld", "ufw"],

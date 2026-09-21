@@ -1,0 +1,31 @@
+# nft list ruleset captured from app-gateway-01
+ table inet filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+        ip saddr 10.40.0.0/16 tcp dport 22 ct state new comment "platform administration" accept
+        ip saddr 10.40.0.0/16 tcp dport { 80, 443 } ct state new accept
+        ip saddr 10.40.12.10-10.40.12.40 tcp dport 9090 ct state new accept
+        ip saddr { 10.50.0.0/16, 10.60.0.0/16 } tcp dport 8443 accept
+        tcp dport 8080 accept
+        tcp sport 1024-65535 accept
+        counter log prefix "nft input denied: "
+        counter drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        counter drop
+    }
+    chain output {
+        type filter hook output priority filter; policy drop;
+        ct state established,related accept
+        ip daddr 10.40.20.0/24 tcp dport 5432 ct state new accept
+        tcp dport 443 ct state new accept
+        udp daddr 10.40.0.53 udp dport 53 ct state new accept
+        counter log prefix "nft output denied: "
+        counter drop
+    }
+}
