@@ -11,7 +11,7 @@ import shlex
 from firewall_analyzer.models import Chain, PortRange, Rule
 
 
-def load_iptables(source) -> dict[str, Chain]:
+def load_iptables(source: str | list[str]) -> dict[str, Chain]:
     """
     Parse an iptables-save file or text into {chain_name: Chain}.
 

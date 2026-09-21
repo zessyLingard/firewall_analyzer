@@ -2,8 +2,8 @@
 """
 firewall_analyzer.parsers — unified parser entry point.
 
-Auto-detects format and calls the appropriate parser.
-All return dict[str, Chain].
+Auto-detects format, calls the appropriate parser, and normalizes the result
+into one PolicyGraph consumed by the analysis services.
 
 Usage:
     from firewall_analyzer.parsers import load_rules
@@ -13,10 +13,17 @@ Usage:
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
+
 from firewall_analyzer.parsers import iptables, nftables, firewalld, ufw
 from firewall_analyzer.models import Chain
+from firewall_analyzer.policy_graph import PolicyGraph, normalize_chains
 
-_FORMAT_LOADERS = {
+ParserSource = str | list[str]
+ParserLoader = Callable[[ParserSource], dict[str, Chain]]
+
+_FORMAT_LOADERS: dict[str, ParserLoader] = {
     "iptables":  iptables.load_iptables,
     "nftables":  nftables.load_nftables,
     "firewalld": firewalld.load_firewalld,
@@ -24,7 +31,7 @@ _FORMAT_LOADERS = {
 }
 
 
-def detect_format(source) -> str:
+def detect_format(source: ParserSource) -> str:
     """
     Detect firewall format from file path or content.
 
@@ -49,6 +56,10 @@ def detect_format(source) -> str:
         return "nftables"
     if "<zone" in content or "<direct>" in content or "<firewall-config>" in content:
         return "firewalld"
+    if re.search(r"^\S+(?:\s+\(active\))?$", content, re.MULTILINE) and any(
+        marker in content for marker in ("target:", "services:", "ports:", "rich rules:")
+    ):
+        return "firewalld"
     if "status:" in content_lower and ("active" in content_lower or "inactive" in content_lower):
         return "ufw"
     if "<service" in content or "<port" in content or "<rule" in content:
@@ -57,7 +68,7 @@ def detect_format(source) -> str:
     return "unknown"
 
 
-def load_rules(source, format: str = "auto") -> dict[str, Chain]:
+def load_rules(source: ParserSource, format: str = "auto") -> PolicyGraph:
     """
     Load firewall rules into Chain objects.
 
@@ -66,7 +77,7 @@ def load_rules(source, format: str = "auto") -> dict[str, Chain]:
         format: "auto" (detect) or one of "iptables", "nftables", "firewalld", "ufw"
 
     Returns:
-        dict[str, Chain]
+        PolicyGraph: format-neutral scopes with JSON serialization support.
 
     Raises:
         ValueError: if format is unknown or not supported
@@ -85,7 +96,7 @@ def load_rules(source, format: str = "auto") -> dict[str, Chain]:
     if loader is None:
         raise ValueError(f"Unknown format: {fmt!r}")
 
-    return loader(source)
+    return normalize_chains(loader(source), source_format=fmt)
 
 
 __all__ = ["load_rules", "detect_format"]

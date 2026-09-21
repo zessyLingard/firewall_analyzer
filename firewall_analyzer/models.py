@@ -153,6 +153,7 @@ class Chain:
     name: str = ""
     default_policy: Optional[str] = None   # ACCEPT | DROP | REJECT
     rules: list[Rule] = field(default_factory=list)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ #

@@ -21,35 +21,43 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass, field
-from typing import Any
+from collections.abc import Mapping
+from ipaddress import IPv4Network, IPv6Network
+from typing import Any, cast
 
-from firewall_analyzer.models import Chain, Rule
+from firewall_analyzer.models import Chain, PortRange, Rule
 
 
 # --------------------------------------------------------------------------- #
 #  Helpers
 # --------------------------------------------------------------------------- #
 
-def _str(r: Any, key: str) -> str | None:
-    v = getattr(r, key, None) if hasattr(r, key) else r.get(key) if isinstance(r, dict) else None
+def _value(r: object, key: str) -> object | None:
+    if isinstance(r, Mapping):
+        return cast(Mapping[str, object], r).get(key)
+    return getattr(r, key, None)
+
+
+def _str(r: object, key: str) -> str | None:
+    v = _value(r, key)
     if isinstance(v, str):
         return v
     if v is None and key == "state":
         # Rule dataclass uses "states" (list), dict uses "state" (str)
-        v = getattr(r, "states", None) if hasattr(r, "states") else r.get("states") if isinstance(r, dict) else None
+        v = _value(r, "states")
         if isinstance(v, list):
-            return ",".join(str(s) for s in v) if v else None
+            return ",".join(str(s) for s in cast(list[object], v)) if v else None
     if v is None:
         return None
     return str(v)
 
 
-def _list(r: Any, key: str) -> list:
-    v = getattr(r, key, None) if hasattr(r, key) else r.get(key) if isinstance(r, dict) else None
+def _list(r: object, key: str) -> list[object]:
+    v = _value(r, key)
     if v is None:
         return []
     if isinstance(v, list):
-        return v
+        return cast(list[object], v)
     return [v]
 
 
@@ -60,7 +68,7 @@ def _is_unrestricted_source(r: Any) -> bool:
     for s in srcs:
         try:
             net = ipaddress.ip_network(s, strict=False) if isinstance(s, str) else s
-            if net.prefixlen > 0:
+            if isinstance(net, (IPv4Network, IPv6Network)) and net.prefixlen > 0:
                 return False
         except (ValueError, AttributeError):
             pass
@@ -74,7 +82,7 @@ def _is_unrestricted_dest(r: Any) -> bool:
     for d in dsts:
         try:
             net = ipaddress.ip_network(d, strict=False) if isinstance(d, str) else d
-            if net.prefixlen > 0:
+            if isinstance(net, (IPv4Network, IPv6Network)) and net.prefixlen > 0:
                 return False
         except (ValueError, AttributeError):
             pass
@@ -85,7 +93,7 @@ def _has_dest_port(r: Any) -> bool:
     if _str(r, "dport") or _str(r, "dports"):
         return True
     for p in _list(r, "ports"):
-        if p.min_port != 0 or p.max_port != 65535:
+        if isinstance(p, PortRange) and (p.min_port != 0 or p.max_port != 65535):
             return True
     return False
 
@@ -114,6 +122,24 @@ def _proto_has_no_ports(r: Any) -> bool:
     p = _proto(r)
     return bool(p and p.strip().lower() in _PORTLESS)
 
+def _is_fully_open_accept(r: Any, direction: str) -> bool:
+    """True when an ACCEPT rule has an unrestricted source or destination."""
+    if _str(r, "action") != "ACCEPT" and _str(r, "target") != "ACCEPT":
+        return False
+    if _is_loopback(r):
+        return False
+    if direction == "INPUT" and _str(r, "chain") in ("OUTPUT", "FORWARD"):
+        return False
+    if direction == "OUTPUT" and _str(r, "chain") != "OUTPUT":
+        return False
+    if direction == "INPUT":
+        if _str(r, "src_range") or not _is_unrestricted_source(r):
+            return False
+    elif direction == "OUTPUT":
+        if _str(r, "dst_range") or not _is_unrestricted_dest(r):
+            return False
+    return _is_state_new(r) and not _is_estab_related_only(r)
+
 
 def _is_estab_related_only(r: Any) -> bool:
     """True if rule ONLY matches ESTABLISHED/RELATED (no NEW state)."""
@@ -132,7 +158,7 @@ def _is_state_new(r: Any) -> bool:
 
 
 def _is_ssh_relevant(r: Any) -> bool:
-    if _str(r, "chain") != "INPUT":
+    if _str(r, "chain") in ("OUTPUT", "FORWARD"):
         return False
     if _str(r, "action") != "ACCEPT" and _str(r, "target") != "ACCEPT":
         return False
@@ -167,14 +193,13 @@ def _matches_ssh_port(r: Any) -> bool:
                     if int(parts[0]) <= 22 <= int(parts[1]):
                         return True
     for p in _list(r, "ports"):
-        if hasattr(p, "contains"):
-            if p.contains(22):
-                return True
+        if isinstance(p, PortRange) and p.contains(22):
+            return True
     return False
 
 
 def _is_spoofable_sport_only(r: Any) -> bool:
-    if _str(r, "chain") != "INPUT":
+    if _str(r, "chain") in ("OUTPUT", "FORWARD"):
         return False
     if _str(r, "action") != "ACCEPT" and _str(r, "target") != "ACCEPT":
         return False
@@ -190,7 +215,7 @@ def _is_spoofable_sport_only(r: Any) -> bool:
     return True
 
 
-def _admin_range(r: Any, admin_nets: list) -> bool:
+def _admin_range(r: object, admin_nets: list[IPv4Network | IPv6Network]) -> bool:
     src_range = _str(r, "src_range")
     if src_range and "-" in src_range:
         start_str, end_str = src_range.split("-", 1)
@@ -206,15 +231,33 @@ def _admin_range(r: Any, admin_nets: list) -> bool:
         src_nets = _list(r, "sources")
         if src_nets:
             try:
-                src_net = ipaddress.ip_network(src_nets[0], strict=False) if isinstance(src_nets[0], str) else src_nets[0]
-                return any(src_net.subnet_of(n) for n in admin_nets)
+                src_net = (
+                    ipaddress.ip_network(src_nets[0], strict=False)
+                    if isinstance(src_nets[0], str)
+                    else src_nets[0]
+                )
+                if not isinstance(src_net, (IPv4Network, IPv6Network)):
+                    return False
+                return any(
+                    (isinstance(src_net, IPv4Network) and isinstance(n, IPv4Network)
+                     and src_net.subnet_of(n))
+                    or (isinstance(src_net, IPv6Network) and isinstance(n, IPv6Network)
+                        and src_net.subnet_of(n))
+                    for n in admin_nets
+                )
             except (ValueError, AttributeError, TypeError):
                 pass
         return False
 
     try:
         src_net = ipaddress.ip_network(src, strict=False)
-        return any(src_net.subnet_of(n) for n in admin_nets)
+        return any(
+            (isinstance(src_net, IPv4Network) and isinstance(n, IPv4Network)
+             and src_net.subnet_of(n))
+            or (isinstance(src_net, IPv6Network) and isinstance(n, IPv6Network)
+                and src_net.subnet_of(n))
+            for n in admin_nets
+        )
     except (ValueError, TypeError):
         return False
 
@@ -223,18 +266,22 @@ def _admin_range(r: Any, admin_nets: list) -> bool:
 #  Result dataclass
 # --------------------------------------------------------------------------- #
 
+def _new_string_list() -> list[str]:
+    return []
+
+
 @dataclass
 class AuditResult:
     default_policy: tuple[bool, str] = (False, "")
-    missing_estab: list[str] = field(default_factory=list)
-    ssh_no_comment: list[str] = field(default_factory=list)
-    ssh_open_source: list[str] = field(default_factory=list)
-    input_no_port: list[str] = field(default_factory=list)
-    output_no_port: list[str] = field(default_factory=list)
-    input_fully_open: list[str] = field(default_factory=list)
-    output_fully_open: list[str] = field(default_factory=list)
-    ssh_outside_admin: list[str] = field(default_factory=list)
-    sport_spoofable: list[str] = field(default_factory=list)
+    missing_estab: list[str] = field(default_factory=_new_string_list)
+    ssh_no_comment: list[str] = field(default_factory=_new_string_list)
+    ssh_open_source: list[str] = field(default_factory=_new_string_list)
+    input_no_port: list[str] = field(default_factory=_new_string_list)
+    output_no_port: list[str] = field(default_factory=_new_string_list)
+    input_fully_open: list[str] = field(default_factory=_new_string_list)
+    output_fully_open: list[str] = field(default_factory=_new_string_list)
+    ssh_outside_admin: list[str] = field(default_factory=_new_string_list)
+    sport_spoofable: list[str] = field(default_factory=_new_string_list)
 
     def has_failures(self) -> bool:
         return (
@@ -249,7 +296,7 @@ class AuditResult:
             or bool(self.sport_spoofable)
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return {
             "default_policy": {"passed": self.default_policy[0], "reason": self.default_policy[1]},
             "missing_established_related": self.missing_estab,
@@ -268,7 +315,7 @@ class AuditResult:
 #  Main audit runner
 # --------------------------------------------------------------------------- #
 
-def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) -> AuditResult:
+def run_audit(chains: Mapping[str, Chain], admin_cidrs: list[str] | None = None) -> AuditResult:
     """
     Run the 10-point security audit on parsed chains.
 
@@ -279,7 +326,7 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
     Returns:
         AuditResult
     """
-    admin_nets = []
+    admin_nets: list[IPv4Network | IPv6Network] = []
     if admin_cidrs:
         for cidr in admin_cidrs:
             try:
@@ -296,6 +343,11 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
         rules_by_chain[name] = chain.rules
         all_rules.extend(chain.rules)
 
+    inbound_chain_names = [name for name in chains if name not in ("OUTPUT", "FORWARD")]
+    if "INPUT" in chains:
+        inbound_chain_names = ["INPUT"]
+    inbound_rules = [rule for name in inbound_chain_names for rule in rules_by_chain.get(name, [])]
+
     # 1. Default policy
     explicit_drop = {ch: any(
         (_str(r, "action") == d or _str(r, "target") == d)
@@ -307,6 +359,8 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
     out_pol = policies.get("OUTPUT", "").upper()
     if inp_pol in ("DROP", "REJECT") and out_pol in ("DROP", "REJECT"):
         policy_ok, policy_reason = True, "Default policy INPUT/OUTPUT = DROP/REJECT"
+    elif "INPUT" not in chains and "OUTPUT" not in chains and inbound_chain_names:
+        policy_ok, policy_reason = True, "firewalld zone targets control inbound traffic; no INPUT/OUTPUT chains are present"
     elif explicit_drop.get("INPUT") and explicit_drop.get("OUTPUT"):
         policy_ok, policy_reason = True, "Co rule '-j DROP'/'-j REJECT' tuong minh o INPUT va OUTPUT"
     else:
@@ -329,7 +383,10 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
         has_estab = any(
             (_str(r, "action") == "ACCEPT" or _str(r, "target") == "ACCEPT")
             and bool(_str(r, "state"))
-            and ("ESTABLISHED" in _str(r, "state").upper() or "RELATED" in _str(r, "state").upper())
+            and (
+                (state := _str(r, "state")) is not None
+                and ("ESTABLISHED" in state.upper() or "RELATED" in state.upper())
+            )
             for r in ch_rules
         )
         if not has_estab:
@@ -353,7 +410,7 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
 
     # 3a. INPUT without dest port restriction
     input_no_port: list[str] = []
-    for r in rules_by_chain.get("INPUT", []):
+    for r in inbound_rules:
         if _str(r, "action") != "ACCEPT" and _str(r, "target") != "ACCEPT":
             continue
         if _is_loopback(r):
@@ -387,41 +444,15 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
 
     # 4a. INPUT fully open
     input_fully_open: list[str] = []
-    for r in rules_by_chain.get("INPUT", []):
-        if _str(r, "action") != "ACCEPT" and _str(r, "target") != "ACCEPT":
-            continue
-        if _is_loopback(r):
-            continue
-        if _is_estab_related_only(r):
-            continue
-        if _proto_has_no_ports(r):
-            continue
-        if _str(r, "src_range"):
-            continue
-        if not _is_unrestricted_source(r):
-            continue
-        if not _is_state_new(r):
-            continue
-        input_fully_open.append(_str(r, "raw_line") or "")
+    for r in inbound_rules:
+        if _is_fully_open_accept(r, "INPUT"):
+            input_fully_open.append(_str(r, "raw_line") or "")
 
     # 4b. OUTPUT fully open
     output_fully_open: list[str] = []
     for r in rules_by_chain.get("OUTPUT", []):
-        if _str(r, "action") != "ACCEPT" and _str(r, "target") != "ACCEPT":
-            continue
-        if _is_loopback(r):
-            continue
-        if _is_estab_related_only(r):
-            continue
-        if _proto_has_no_ports(r):
-            continue
-        if _str(r, "dst_range"):
-            continue
-        if not _is_unrestricted_dest(r):
-            continue
-        if not _is_state_new(r):
-            continue
-        output_fully_open.append(_str(r, "raw_line") or "")
+        if _is_fully_open_accept(r, "OUTPUT"):
+            output_fully_open.append(_str(r, "raw_line") or "")
 
     # 5. SSH outside admin range
     ssh_outside_admin: list[str] = []
@@ -432,7 +463,7 @@ def run_audit(chains: dict[str, Chain], admin_cidrs: list[str] | None = None) ->
 
     # 6. Sport-only spoofable
     sport_spoofable: list[str] = []
-    for r in rules_by_chain.get("INPUT", []):
+    for r in inbound_rules:
         if _is_spoofable_sport_only(r):
             sport_spoofable.append(_str(r, "raw_line") or "")
 

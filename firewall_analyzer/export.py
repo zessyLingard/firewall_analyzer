@@ -6,22 +6,20 @@ export.py — Export firewall audit results to various formats (HTML, SARIF, JSO
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional
 from dataclasses import asdict
 
 from firewall_analyzer.models import Chain, Rule, PortRange
-from firewall_analyzer.trace_engine import TraceResult, Packet, format_trace_json
 from firewall_analyzer.shadowing import ShadowFinding, format_shadowing_json
 
 
 def export_audit_json(
-    chains: dict[str, Chain],
-    trace_results: Optional[list[TraceResult]] = None,
+    chains: Mapping[str, Chain],
     shadowing_findings: Optional[list[ShadowFinding]] = None,
-    packet: Optional[Packet] = None,
     filepath: str = "",
-    metadata: Optional[dict] = None,
+    metadata: Optional[dict[str, object]] = None,
 ) -> str:
     """Export complete audit results as JSON."""
     data = {
@@ -41,10 +39,6 @@ def export_audit_json(
             "default_policy": chain.default_policy,
             "rules": [_rule_to_dict(r) for r in chain.rules],
         }
-    
-    # Export trace results
-    if trace_results and packet:
-        data["trace"] = json.loads(format_trace_json(trace_results, packet))
     
     # Export shadowing findings
     if shadowing_findings:
@@ -77,9 +71,8 @@ def _rule_to_dict(rule: Rule) -> dict:
 
 
 def export_sarif(
-    chains: dict[str, Chain],
-    audit_results: dict,  # From audit scripts
-    trace_results: Optional[list[TraceResult]] = None,
+    chains: Mapping[str, Chain],
+    audit_results: Mapping[str, object],  # From audit scripts
     shadowing_findings: Optional[list[ShadowFinding]] = None,
     filepath: str = "",
 ) -> str:
@@ -164,11 +157,9 @@ def _make_sarif_result(
 
 
 def export_html(
-    chains: dict[str, Chain],
-    audit_results: Optional[dict] = None,
-    trace_results: Optional[list[TraceResult]] = None,
+    chains: Mapping[str, Chain],
+    audit_results: Optional[Mapping[str, object]] = None,
     shadowing_findings: Optional[list[ShadowFinding]] = None,
-    packet: Optional[Packet] = None,
     filepath: str = "",
     title: str = "Firewall Audit Report",
 ) -> str:
@@ -287,36 +278,6 @@ def export_html(
             elif isinstance(check_data, dict):
                 for k, v in check_data.items():
                     html += f'<p><strong>{k}:</strong> {v}</p>'
-        html += '</div>'
-    
-    # Trace results
-    if trace_results and packet:
-        html += '<div class="section"><h2>Packet Trace</h2>'
-        html += f'<p><strong>Packet:</strong> {packet.src_ip}:{packet.src_port} → {packet.dst_ip}:{packet.dst_port} ({packet.protocol.upper()})'
-        if packet.in_iface:
-            html += f' | in: {packet.in_iface}'
-        if packet.out_iface:
-            html += f' | out: {packet.out_iface}'
-        if packet.state:
-            html += f' | state: {packet.state}'
-        html += '</p>'
-        
-        current_chain = None
-        for r in trace_results:
-            if r.chain != current_chain:
-                current_chain = r.chain
-                html += f'<div class="trace-chain">>>> Chain: {current_chain}</div>'
-            
-            cls = "trace-match" if r.matched else "trace-nomatch"
-            verdict = f' → {r.verdict}' if r.verdict != "CONTINUE" else ""
-            html += f'<div class="trace-step {cls}">'
-            html += f'<strong>[{r.rule_index}] {"✓ MATCH" if r.matched else "✗ NO MATCH"}{verdict}</strong><br>'
-            for reason in r.match_reasons:
-                html += f'<span style="color: #28a745;">✓</span> {reason}<br>'
-            for reason in r.mismatch_reasons:
-                html += f'<span style="color: #dc3545;">✗</span> {reason}<br>'
-            html += f'<small>{r.rule.raw_line if r.rule else ""}</small>'
-            html += '</div>'
         html += '</div>'
     
     # Shadowing findings

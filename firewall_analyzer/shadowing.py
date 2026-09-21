@@ -12,6 +12,7 @@ Detects:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Optional
 from ipaddress import IPv4Network, IPv6Network, ip_network, ip_address
 
@@ -364,7 +365,7 @@ def analyze_chain_shadowing(chain: Chain) -> list[ShadowFinding]:
     return findings
 
 
-def analyze_unreachable_rules(chains: dict[str, Chain]) -> list[ShadowFinding]:
+def analyze_unreachable_rules(chains: Mapping[str, Chain]) -> list[ShadowFinding]:
     """Find rules that can never be reached due to preceding terminating rules."""
     findings = []
     
@@ -411,7 +412,7 @@ def analyze_unreachable_rules(chains: dict[str, Chain]) -> list[ShadowFinding]:
     return findings
 
 
-def analyze_shadowing(chains: dict[str, Chain]) -> list[ShadowFinding]:
+def analyze_shadowing(chains: Mapping[str, Chain]) -> list[ShadowFinding]:
     """
     Analyze shadowing across all chains.
     Returns list of ShadowFinding objects.

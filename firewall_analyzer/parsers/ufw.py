@@ -17,7 +17,7 @@ import re
 from firewall_analyzer.models import Chain, PortRange, Rule
 
 
-def load_ufw(source) -> dict[str, Chain]:
+def load_ufw(source: str | list[str]) -> dict[str, Chain]:
     """
     Parse a ufw file or output text into {chain_name: Chain}.
 
@@ -95,7 +95,16 @@ def _parse_status_output(lines: list[str]) -> dict[str, Chain]:
             if cidr_m:
                 srcs = [_safe_net(cidr_m.group(1))]
             else:
-                srcs = [ipaddress.ip_network("0.0.0.0/0")]
+                host_m = re.search(r"([0-9a-fA-F:.]+)", dest_info)
+                if host_m:
+                    try:
+                        address = ipaddress.ip_address(host_m.group(1))
+                        prefix = 128 if address.version == 6 else 32
+                        srcs = [ipaddress.ip_network(f"{address}/{prefix}")]
+                    except ValueError:
+                        srcs = [ipaddress.ip_network("0.0.0.0/0")]
+                else:
+                    srcs = [ipaddress.ip_network("0.0.0.0/0")]
 
         raw = ln
         chains["INPUT"].rules.append(Rule(

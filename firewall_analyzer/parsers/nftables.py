@@ -20,7 +20,7 @@ _HOOK_MAP = {
 }
 
 
-def load_nftables(source) -> dict[str, Chain]:
+def load_nftables(source: str | list[str]) -> dict[str, Chain]:
     """
     Parse an nftables list-format file or text into {chain_name: Chain}.
 
@@ -133,6 +133,10 @@ def _parse_stmt(stmt: str, chain: str) -> Rule | None:
             act = tok.upper(); j += 1; continue
         if tok == "notrack":
             act = "NOTRACK"; j += 1; continue
+        if tok in ("jump", "goto") and j + 1 < len(tokens):
+            act = tokens[j + 1].strip().upper()
+            j += 2
+            continue
 
         if tok in ("ip", "ipv4"):
             proto = "ip"; j += 1; continue
@@ -213,7 +217,7 @@ def _parse_stmt(stmt: str, chain: str) -> Rule | None:
 
 
 _KEYWORDS = frozenset({
-    "accept", "drop", "reject", "log", "notrack",
+    "accept", "drop", "reject", "log", "notrack", "jump", "goto",
     "ip", "ip6", "ipv4", "ipv6", "tcp", "udp", "icmp", "ct",
     "saddr", "daddr", "dport", "sport", "comment",
     "iif", "iifname", "oif", "oifname", "state",
@@ -237,7 +241,7 @@ def _collect_value(tokens: list[str], start: int) -> tuple[str, int]:
 
 def _reassemble(tokens: list[str], start: int) -> tuple[str | None, int]:
     """Reassemble a dotted-quad IP that shlex split into fragments."""
-    kw = frozenset({"accept", "drop", "reject", "log", "notrack",
+    kw = frozenset({"accept", "drop", "reject", "log", "notrack", "jump", "goto",
                      "ip", "ip6", "ipv4", "ipv6", "tcp", "udp", "icmp", "ct",
                      "saddr", "daddr", "dport", "sport", "comment",
                      "iif", "iifname", "oif", "oifname", "state"})
